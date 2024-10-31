@@ -1,65 +1,120 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.18;
 
-import {AggregatorV3Interface} from "lib/chainlink-brownie-contracts/contracts/src/v0.8/interfaces/AggregatorV3Interface.sol";
-import {PriceConverter} from "./PriceConverter.sol";
-import {InterestDistribution} from "./InterestDistribution.sol";
+contract LendingPool {
+    // Struct to store lender information
+    struct Lender {
+        uint256 depositAmount;
+        uint256 depositTimestamp;
+    }
 
-contract LendingPool{
-    using PriceConverter for uint256;
+    mapping(address => Lender) public lenders;
+    
 
-    mapping(address => uint256) public userDeposits;
-    uint256 public totalDeposits;
-    AggregatorV3Interface private priceFeed;
+    address[] public lenderAddresses;
 
-    event Deposit(address indexed user, uint256 amount);
-    event Withdraw(address indexed user, uint256 amount);
+    uint256 public totalSupply;       
+    uint256 public totalInterest;     
 
-    // Function to deposit ETH into the lending pool
+    event Deposit(address indexed lender, uint256 amount);
+    event Withdraw(address indexed lender, uint256 amount, uint256 interest);
+
     function deposit() external payable {
-        require(msg.value > 0, "Deposit amount must be greater than 0");
+        require(msg.value > 0, "Must deposit more than 0 ETH");
 
-        userDeposits[msg.sender] += msg.value;
-        totalDeposits += msg.value;
+        if (lenders[msg.sender].depositAmount == 0) {
+            lenderAddresses.push(msg.sender);
+        }
+
+        // Update lender information
+        lenders[msg.sender].depositAmount += msg.value;
+        lenders[msg.sender].depositTimestamp = block.timestamp;
+
+        // Update total supply
+        totalSupply += msg.value;
 
         emit Deposit(msg.sender, msg.value);
     }
 
-    // Function to withdraw ETH from the lending pool
-    function withdraw(uint256 amount) external{
-        require(amount > 0, "Withdrawal amount must be greater than 0");
-        require(userDeposits[msg.sender] >= amount, "Insufficient balance");
-        require(address(this).balance >= amount, "Insufficient liquidity in the pool");
+    function withdraw() external {
+        Lender storage lender = lenders[msg.sender];
+        require(lender.depositAmount > 0, "No deposits found");
 
-        userDeposits[msg.sender] -= amount;
-        totalDeposits -= amount;
+        // Calculate amounts
+        uint256 supplyRatio = (lender.depositAmount * 1e18) / totalSupply;
+        uint256 lenderInterest = (supplyRatio * totalInterest) / 1e18;
+        uint256 totalWithdrawAmount = lender.depositAmount + lenderInterest;
 
-        (bool success, ) = msg.sender.call{value: amount}("");
+        require(address(this).balance >= totalWithdrawAmount, "Insufficient contract balance");
+
+        // Reset lender's deposit info before transfer
+        uint256 amountToWithdraw = totalWithdrawAmount;
+        totalSupply -= lender.depositAmount;
+        delete lenders[msg.sender];
+
+        // Remove lender from array
+        removeLender(msg.sender);
+
+        // Transfer funds
+        (bool success, ) = payable(msg.sender).call{value: amountToWithdraw}("");
         require(success, "Transfer failed");
 
-        emit Withdraw(msg.sender, amount);
+        emit Withdraw(msg.sender, lender.depositAmount, lenderInterest);
     }
 
-    function getLatestEthUsdPrice() public view returns (uint256) {
-        return PriceConverter.getPrice(priceFeed);
+    function addInterest() external payable {
+        require(msg.value > 0, "Must add more than 0 interest");
+        totalInterest += msg.value;
     }
 
-    function getTotalDepositsInUsd() public view returns (uint256) {
-        return totalDeposits.getConversionRate(priceFeed);
+    // New function to handle principal repayment
+    function repayPrincipal() external payable {
+        require(msg.value > 0, "Must repay more than 0");
+        totalSupply += msg.value;
     }
 
-    // Function to check the user's deposited balance
-    function getBalance() external view returns (uint256) {
-        return userDeposits[msg.sender];
+    // Modified function to get total pool value
+    function getTotalPoolValue() external view returns (uint256) {
+        return totalSupply + totalInterest;
     }
 
-    // Function to check the total deposits in the pool
-    function getTotalDeposits() external view returns (uint256) {
-        return totalDeposits;
+    function getAllLenders() external view returns (address[] memory, uint256[] memory) {
+        uint256[] memory deposits = new uint256[](lenderAddresses.length);
+        
+        for (uint i = 0; i < lenderAddresses.length; i++) {
+            deposits[i] = lenders[lenderAddresses[i]].depositAmount;
+        }
+        
+        return (lenderAddresses, deposits);
     }
 
-    // Function to check the contract's ETH balance
+    function getSupplyRatio(address lender) public view returns (uint256) {
+        if (totalSupply == 0) return 0;
+        return (lenders[lender].depositAmount * 1e18) / totalSupply;
+    }
+
+    function getLenderInterest(address lender) public view returns (uint256) {
+        uint256 supplyRatio = getSupplyRatio(lender);
+        return (supplyRatio * totalInterest) / 1e18;
+    }
+
+    function getWithdrawableAmount(address lender) external view returns (uint256) {
+        return lenders[lender].depositAmount + getLenderInterest(lender);
+    }
+
+    function removeLender(address lenderAddress) internal {
+        for (uint i = 0; i < lenderAddresses.length; i++) {
+            if (lenderAddresses[i] == lenderAddress) {
+                lenderAddresses[i] = lenderAddresses[lenderAddresses.length - 1];
+                lenderAddresses.pop();
+                break;
+            }
+        }
+    }
+
     function getContractBalance() external view returns (uint256) {
         return address(this).balance;
     }
+
+    receive() external payable {}
 }
