@@ -6,6 +6,8 @@ import "./LendingPool.sol";
 contract BorrowingContract {
     LendingPool public lendingPool;
 
+    address public repaymentContract;
+
     struct Borrower {
         uint256 collateralAmount;
         uint256 activeLoanAmount;
